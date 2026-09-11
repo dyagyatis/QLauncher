@@ -1,912 +1,409 @@
-using CmlLib.Core;
-using CmlLib.Core.Auth;
-using CmlLib.Core.Auth.Microsoft;
-using CmlLib.Core.Installer;
-using CmlLib.Core.ModLoaders.FabricMC;
-using CmlLib.Core.ProcessBuilder;
-using fNbt;
-using HtmlAgilityPack;
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
-using System.IO.Packaging;
-using System.Net.Http;
-using System.Text.Json;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
-using System.Web;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using MinecraftLauncher.Common;
+using MinecraftLauncher.Services;
+using MinecraftLauncher.ViewModels;
+using MinecraftLauncher.Views.Pages;
+using MinecraftLauncher.Views.Windows;
 
 namespace MinecraftLauncher
 {
-    public class TelegramPost
-    {
-        public string Date { get; set; } = "";
-        public string Text { get; set; } = "";
-        public string ImageUrl { get; set; } = "";
-        public Visibility ImageVisibility => string.IsNullOrEmpty(ImageUrl) ? Visibility.Collapsed : Visibility.Visible;
-    }
-
-    public class CornerRadiusAnimation : AnimationTimeline
-    {
-        public override Type TargetPropertyType => typeof(CornerRadius);
-        protected override Freezable CreateInstanceCore() => new CornerRadiusAnimation();
-        public static readonly DependencyProperty FromProperty = DependencyProperty.Register("From", typeof(CornerRadius), typeof(CornerRadiusAnimation));
-        public CornerRadius From { get => (CornerRadius)GetValue(FromProperty); set => SetValue(FromProperty, value); }
-        public static readonly DependencyProperty ToProperty = DependencyProperty.Register("To", typeof(CornerRadius), typeof(CornerRadiusAnimation));
-        public CornerRadius To { get => (CornerRadius)GetValue(ToProperty); set => SetValue(ToProperty, value); }
-        public static readonly DependencyProperty EasingFunctionProperty = DependencyProperty.Register("EasingFunction", typeof(IEasingFunction), typeof(CornerRadiusAnimation));
-        public IEasingFunction EasingFunction { get => (IEasingFunction)GetValue(EasingFunctionProperty); set => SetValue(EasingFunctionProperty, value); }
-
-        public override object GetCurrentValue(object defaultOriginValue, object defaultDestinationValue, AnimationClock animationClock)
-        {
-            if (!animationClock.CurrentProgress.HasValue) return From;
-            double p = animationClock.CurrentProgress.Value;
-            if (EasingFunction != null) p = EasingFunction.Ease(p);
-            return new CornerRadius(
-                From.TopLeft + (To.TopLeft - From.TopLeft) * p,
-                From.TopRight + (To.TopRight - From.TopRight) * p,
-                From.BottomRight + (To.BottomRight - From.BottomRight) * p,
-                From.BottomLeft + (To.BottomLeft - From.BottomLeft) * p
-            );
-        }
-    }
-    
-    
     public partial class MainWindow : Window
     {
-        private CmlLib.Core.MinecraftLauncher _launcher = null!;
-        private MinecraftPath _minecraftPath = null!;
+        public MainViewModel ViewModel { get; }
+
         private double _normalLeft, _normalTop, _normalWidth, _normalHeight;
-        private bool _isCustomMaximized = false;
-        private DispatcherTimer _newsTimer = null!;
+        private bool _isCustomMaximized;
+        private GameConsoleWindow? _consoleWindow;
 
-        private long _lastBytes = 0;
-        private DateTime _lastTime = DateTime.Now;
-        private string _currentSpeedStr = "0 МБ/с";
-
-        private static readonly HttpClient SharedHttpClient = CreateAntiBlockClient();
-
-        private static HttpClient CreateAntiBlockClient()
+        public MainWindow()
         {
-            var handler = new HttpClientHandler
+            InitializeComponent();
+            ViewModel = new MainViewModel();
+            DataContext = ViewModel;
+
+            ViewModel.GameLaunched += OnGameLaunched;
+            ViewModel.RequestClose += () => Close();
+            ViewModel.RequestHide += () =>
             {
-                ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true,
-                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+                LauncherTrayIcon.Visibility = Visibility.Visible;
+                Hide();
             };
+            ViewModel.RequestShow += RestoreLauncher;
 
-            var client = new HttpClient(handler);
-            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "*/*");
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
+            MainFrame.Navigated += MainFrame_Navigated;
 
-            return client;
+            ThemeService.Instance.ThemeChanged += () => Dispatcher.Invoke(UpdateThemeUi);
+            UpdateThemeUi();
+
+            Loaded += MainWindow_Loaded;
         }
 
-        // === ЛОГИКА СМЕНЫ ТЕМЫ (С АНИМАЦИЕЙ) ===
-        private bool _isDarkTheme = true;
+        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            ToastService.Instance.RegisterContainer(ToastContainer);
 
-        private void AnimateNavigate(Page page)
+            if (!string.IsNullOrEmpty(App.JustUpdatedVersion))
+            {
+                ToastService.Instance.ShowSuccess($"QLauncher успешно обновлен до {App.JustUpdatedVersion}!", "Обновление");
+                App.JustUpdatedVersion = null;
+            }
+
+            var loadFade = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(350));
+            ContentGrid.BeginAnimation(UIElement.OpacityProperty, loadFade);
+
+            await ViewModel.InitializeAsync();
+
+            ViewModel.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(MainViewModel.ProgressFillRatio))
+                {
+                    if (ProgressHostGrid.ActualWidth > 0)
+                    {
+                        double targetWidth = Math.Max(0, Math.Min(ProgressHostGrid.ActualWidth, ViewModel.ProgressFillRatio * ProgressHostGrid.ActualWidth));
+                        ProgressFillBorder.Width = targetWidth;
+                        ProgressFillBorder.Visibility = targetWidth > 0 ? Visibility.Visible : Visibility.Collapsed;
+                    }
+                }
+                else if (args.PropertyName == nameof(MainViewModel.IsModpackOverlayVisible))
+                {
+                    if (ViewModel.IsModpackOverlayVisible)
+                    {
+                        AnimateOpenModpackOverlay();
+                    }
+                    else
+                    {
+                        AnimateCloseModpackOverlay();
+                    }
+                }
+                else if (args.PropertyName == nameof(MainViewModel.IsShortcutOverlayVisible))
+                {
+                    if (ViewModel.IsShortcutOverlayVisible)
+                    {
+                        ViewModel.DiscordService.SetPageState("Создание ярлыка", "Быстрый запуск");
+                    }
+                    else
+                    {
+                        if (MainFrame.Visibility == Visibility.Visible && MainFrame.Content != null)
+                        {
+                            UpdateDiscordForPage(MainFrame.Content);
+                        }
+                        else
+                        {
+                            ViewModel.DiscordService.SetMenuState(ViewModel.SelectedVersion);
+                        }
+                    }
+                }
+            };
+        }
+
+        private void OnGameLaunched(System.Diagnostics.Process process)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_consoleWindow == null || !_consoleWindow.IsLoaded)
+                {
+                    _consoleWindow = new GameConsoleWindow();
+                }
+
+                _consoleWindow.AttachProcess(process);
+                _consoleWindow.Show();
+                _consoleWindow.Activate();
+            });
+        }
+
+        public void AnimateNavigate(Page page)
         {
             HomeView.Visibility = Visibility.Collapsed;
             MainFrame.Visibility = Visibility.Visible;
             MainFrame.Navigate(page);
 
-            // Анимация выезда справа (от 100 пикселей до 0)
-            DoubleAnimation slideAnim = new DoubleAnimation
+            var slideAnim = new DoubleAnimation
             {
-                From = 100,
+                From = 90,
                 To = 0,
-                Duration = TimeSpan.FromMilliseconds(300),
+                Duration = TimeSpan.FromMilliseconds(250),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
 
-            // Анимация прозрачности
-            DoubleAnimation fadeAnim = new DoubleAnimation
+            var fadeAnim = new DoubleAnimation
             {
                 From = 0,
                 To = 1,
-                Duration = TimeSpan.FromMilliseconds(300)
+                Duration = TimeSpan.FromMilliseconds(250)
             };
 
             MainFrameTransform.BeginAnimation(TranslateTransform.XProperty, slideAnim);
             MainFrame.BeginAnimation(UIElement.OpacityProperty, fadeAnim);
         }
 
-        private void ThemeToggleBtn_Click(object sender, RoutedEventArgs e)
+        public async void AnimateGoBack()
         {
-            _isDarkTheme = !_isDarkTheme;
-            string themeName = _isDarkTheme ? "DarkTheme.xaml" : "LightTheme.xaml";
-
-            var uri = new Uri($"Themes/{themeName}", UriKind.Relative);
-            var dict = new ResourceDictionary() { Source = uri };
-
-            // Анимация исчезновения
-            var fadeOut = new DoubleAnimation(1.0, 0.0, TimeSpan.FromMilliseconds(150));
-            fadeOut.Completed += (s, args) =>
+            if (MainFrame.CanGoBack)
             {
-                // Смена цветов
-                Application.Current.Resources.MergedDictionaries.Clear();
-                Application.Current.Resources.MergedDictionaries.Add(dict);
-
-                if (sender is Button btn) btn.Content = _isDarkTheme ? "\uE706" : "\uE708";
-
-                // Анимация появления
-                var fadeIn = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(200));
-                ContentGrid.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-            };
-
-            ContentGrid.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-        }
-
-        public MainWindow()
-        {
-            InitializeComponent();
-            DiscordManager.StartRpc();
-            Loaded += MainWindow_Loaded;
-        }
-
-        public class ServerListItem
-        {
-            public string Name { get; set; } = "";
-            public string Ip { get; set; } = "";
-            public string OnlineText { get; set; } = "Загрузка...";
-            public string Version { get; set; } = "...";
-            public double ProgressWidth { get; set; } = 0;
-            public string PingText { get; set; } = "";
-            public Brush PingColor { get; set; } = new SolidColorBrush(Color.FromRgb(150, 150, 150));
-        }
-
-        private async Task UpdateServerStatus()
-        {
-            try
-            {
-                var settings = SettingsManager.Load();
-                string serversFile = Path.Combine(settings.GamePath, "servers.dat");
-
-                var uiServers = new List<ServerListItem>();
-
-                // 1. Читаем servers.dat
-                if (File.Exists(serversFile))
+                var slideOut = new DoubleAnimation
                 {
-                    var nbtFile = new NbtFile();
-                    nbtFile.LoadFromFile(serversFile);
-                    var serversList = nbtFile.RootTag.Get<NbtList>("servers");
-
-                    if (serversList != null)
-                    {
-                        foreach (NbtCompound serverTag in serversList)
-                        {
-                            string name = serverTag.Get<NbtString>("name")?.Value ?? "Minecraft Server";
-                            string ip = serverTag.Get<NbtString>("ip")?.Value ?? "";
-
-                            if (!string.IsNullOrEmpty(ip))
-                            {
-                                uiServers.Add(new ServerListItem { Name = name, Ip = ip });
-                            }
-                        }
-                    }
-                }
-
-                // Если у игрока еще нет добавленных серверов
-                if (uiServers.Count == 0)
+                    From = 0,
+                    To = 70,
+                    Duration = TimeSpan.FromMilliseconds(160),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+                };
+                var fadeOut = new DoubleAnimation
                 {
-                    uiServers.Add(new ServerListItem { Name = "Список пуст", OnlineText = "Добавьте сервер в игре", Version = "" });
-                    Dispatcher.Invoke(() => ServersItemsControl.ItemsSource = uiServers);
-                    return;
-                }
+                    From = 1,
+                    To = 0,
+                    Duration = TimeSpan.FromMilliseconds(160)
+                };
 
-                // Показываем список сразу, пока идет пинг (со статусом "Загрузка...")
-                Dispatcher.Invoke(() => {
-                    ServersItemsControl.ItemsSource = null;
-                    ServersItemsControl.ItemsSource = uiServers;
-                });
+                MainFrameTransform.BeginAnimation(TranslateTransform.XProperty, slideOut);
+                MainFrame.BeginAnimation(UIElement.OpacityProperty, fadeOut);
 
-                // 2. Асинхронно пингуем каждый сервер
-                foreach (var srv in uiServers)
+                await System.Threading.Tasks.Task.Delay(160);
+
+                MainFrame.GoBack();
+
+                var slideIn = new DoubleAnimation
                 {
-                    var status = await ServerStatusManager.GetStatusAsync(srv.Ip);
-                    if (status.Online)
-                    {
-                        srv.OnlineText = $"{status.PlayersNow}/{status.PlayersMax}";
-                        srv.Version = status.Version;
-
-                        if (status.PingMs >= 0)
-                        {
-                            srv.PingText = $"{status.PingMs} ms";
-                            if (status.PingMs < 60) srv.PingColor = new SolidColorBrush(Color.FromRgb(80, 220, 100));
-                            else if (status.PingMs < 160) srv.PingColor = new SolidColorBrush(Color.FromRgb(240, 200, 50));
-                            else srv.PingColor = new SolidColorBrush(Color.FromRgb(240, 80, 80));
-                        }
-
-                        // Полоска прогресса (максимальная ширина примерно 200 пикселей)
-                        double percentage = status.PlayersMax > 0 ? (double)status.PlayersNow / status.PlayersMax : 0;
-                        srv.ProgressWidth = 200 * percentage;
-                    }
-                    else
-                    {
-                        srv.OnlineText = "Offline";
-                        srv.Version = "Нет связи";
-                        srv.ProgressWidth = 0;
-                        srv.PingText = "-";
-                        srv.PingColor = new SolidColorBrush(Color.FromRgb(150, 150, 150));
-                    }
-                }
-
-                // 3. Обновляем список на экране после пинга
-                Dispatcher.Invoke(() => {
-                    ServersItemsControl.ItemsSource = null;
-                    ServersItemsControl.ItemsSource = uiServers;
-                });
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Ошибка обновления серверов: " + ex.Message);
-            }
-        }
-
-        private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
-        {
-            ToastManager.RegisterContainer(ToastContainer);
-
-            // Плавное появление интерфейса при запуске
-            var loadFade = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(400));
-            ContentGrid.BeginAnimation(UIElement.OpacityProperty, loadFade);
-
-            await InitializeLauncherAsync();
-            await UpdateServerStatus();
-            await LoadTelegramNewsAsync();
-
-            _newsTimer = new DispatcherTimer();
-            _newsTimer.Interval = TimeSpan.FromMinutes(3);
-            _newsTimer.Tick += async (s, args) => await LoadTelegramNewsAsync();
-            _newsTimer.Start();
-
-            var timer = new System.Windows.Threading.DispatcherTimer();
-            timer.Tick += async (s, ev) => await UpdateServerStatus();
-            timer.Interval = TimeSpan.FromMinutes(2);
-            timer.Start();
-
-            _ = Task.Run(async () => await CheckForLauncherUpdatesAsync());
-        }
-
-        private async Task CheckForLauncherUpdatesAsync()
-        {
-            var releaseInfo = await UpdateChecker.CheckForUpdatesAsync();
-            if (releaseInfo != null && releaseInfo.HasUpdate)
-            {
-                Dispatcher.Invoke(() =>
+                    From = -70,
+                    To = 0,
+                    Duration = TimeSpan.FromMilliseconds(200),
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                var fadeIn = new DoubleAnimation
                 {
-                    if (MessageBox.Show($"Доступна новая версия QLauncher ({releaseInfo.TagName})!\n\nХотите открыть страницу загрузки?", "Обновление QLauncher", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
-                    {
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = releaseInfo.HtmlUrl,
-                            UseShellExecute = true
-                        });
-                    }
-                });
-            }
-        }
+                    From = 0,
+                    To = 1,
+                    Duration = TimeSpan.FromMilliseconds(200)
+                };
 
-        // === АВТО-ДОБАВЛЕНИЕ СЕРВЕРОВ В SERVERS.DAT ===
-        private void InjectServersIfEnabled(string gamePath)
-        {
-            var settings = SettingsManager.Load();
-            if (!settings.AutoAddServers) return;
-
-            try
-            {
-                string serversFile = Path.Combine(gamePath, "servers.dat");
-                NbtFile nbtFile = new NbtFile();
-                NbtList serversList;
-
-                if (File.Exists(serversFile))
-                {
-                    nbtFile.LoadFromFile(serversFile);
-                    serversList = nbtFile.RootTag.Get<NbtList>("servers") ?? new NbtList("servers", NbtTagType.Compound);
-                    if (nbtFile.RootTag.Get("servers") == null) nbtFile.RootTag.Add(serversList);
-                }
-                else
-                {
-                    nbtFile.RootTag = new NbtCompound("");
-                    serversList = new NbtList("servers", NbtTagType.Compound);
-                    nbtFile.RootTag.Add(serversList);
-                }
-
-                string targetIp = "play.scraft.ru";
-                string targetName = "SCRAFT Server";
-
-                bool exists = false;
-                foreach (NbtCompound server in serversList)
-                {
-                    if (server.Get<NbtString>("ip")?.Value == targetIp)
-                    {
-                        exists = true;
-                        break;
-                    }
-                }
-
-                if (!exists)
-                {
-                    var newServer = new NbtCompound();
-                    newServer.Add(new NbtString("ip", targetIp));
-                    newServer.Add(new NbtString("name", targetName));
-                    newServer.Add(new NbtByte("acceptTextures", 1));
-                    serversList.Add(newServer);
-
-                    nbtFile.SaveToFile(serversFile, NbtCompression.None);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Не удалось добавить сервер: " + ex.Message);
-            }
-        }
-
-        private async void CheckForQuickPlay()
-        {
-            try
-            {
-                string[] args = Environment.GetCommandLineArgs();
-
-                // Проверяем все переданные аргументы
-                for (int i = 1; i < args.Length; i++)
-                {
-                    if (args[i] == "-quickplay" && i + 2 < args.Length)
-                    {
-                        string targetVersion = args[i + 1];
-                        string serverIp = args[i + 2];
-
-                        // Подстраховка: если лаунчер еще не успел выбрать аккаунт визуально,
-                        // принудительно выбираем первый из списка, чтобы игра не отменила запуск
-                        if (NicknameComboBox.SelectedItem == null && NicknameComboBox.Items.Count > 0)
-                        {
-                            var settings = SettingsManager.Load();
-                            NicknameComboBox.SelectedItem = settings.Accounts.Find(a => a.Nickname == settings.ActiveAccount)
-                                                          ?? settings.Accounts[0];
-                        }
-
-                        // Устанавливаем версию в списке
-                        VersionComboBox.SelectedItem = targetVersion;
-
-                        // Вызываем запуск
-                        await StartGame(targetVersion, serverIp);
-                        return; // Выходим из цикла
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // Если что-то сломалось, лаунчер больше не будет молчать!
-                QMessageBoxWindow.Show($"Сбой при попытке автозапуска:\n{ex.Message}", "Ошибка QuickPlay", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        public void ApplyCustomWallpaper()
-        {
-            var settings = SettingsManager.Load();
-            if (!string.IsNullOrWhiteSpace(settings.CustomWallpaperPath) && File.Exists(settings.CustomWallpaperPath))
-            {
-                try
-                {
-                    var bitmap = new BitmapImage(new Uri(settings.CustomWallpaperPath, UriKind.Absolute));
-                    BackgroundBorder.Background = new ImageBrush(bitmap) { Stretch = Stretch.UniformToFill };
-                }
-                catch { }
+                MainFrameTransform.BeginAnimation(TranslateTransform.XProperty, slideIn);
+                MainFrame.BeginAnimation(UIElement.OpacityProperty, fadeIn);
             }
             else
             {
-                try
-                {
-                    BackgroundBorder.Background = new ImageBrush(new BitmapImage(new Uri("pack://application:,,,/bg.png", UriKind.Absolute))) { Stretch = Stretch.UniformToFill };
-                }
-                catch { }
+                CloseSettings();
             }
         }
 
-        public async Task InitializeLauncherAsync()
+        private void MainFrame_Navigated(object sender, System.Windows.Navigation.NavigationEventArgs e)
         {
-            var settings = SettingsManager.Load();
-            ApplyCustomWallpaper();
+            UpdateDiscordForPage(e.Content);
+        }
 
-            foreach (var acc in settings.Accounts)
+        public void UpdateDiscordForPage(object? content)
+        {
+            if (content == null)
             {
-                acc.AvatarImage = AvatarHelper.GetDefaultAvatar();
-                _ = Task.Run(async () =>
-                {
-                    var img = await AvatarHelper.GetAvatarAsync(acc.Nickname, acc.Uuid);
-                    if (img != null)
-                    {
-                        Dispatcher.Invoke(() => acc.AvatarImage = img);
-                    }
-                });
+                ViewModel.DiscordService.SetMenuState(ViewModel.SelectedVersion);
+                return;
             }
 
-            NicknameComboBox.ItemsSource = settings.Accounts;
-            NicknameComboBox.SelectedItem = settings.Accounts.Find(a => a.Nickname == settings.ActiveAccount);
-
-            _minecraftPath = new MinecraftPath(settings.GamePath);
-            _launcher = new CmlLib.Core.MinecraftLauncher(_minecraftPath);
-
-            _launcher.FileProgressChanged += (s, args) =>
+            switch (content)
             {
-                Dispatcher.Invoke(() =>
-                {
-                    if (args.TotalTasks > 0)
-                    {
-                        ProgressTextBlock.Text = $"Подготовка ({args.ProgressedTasks}/{args.TotalTasks})";
-                        if (ActionOverlay.Visibility == Visibility.Visible)
-                        {
-                            ActionOverlayText.Text = $"Подготовка ресурсов ({args.ProgressedTasks}/{args.TotalTasks})...";
-                        }
-                    }
-                });
+                case SettingsPage:
+                    ViewModel.DiscordService.SetPageState("В настройках", "Настройки лаунчера");
+                    break;
+                case ModpacksPage:
+                    ViewModel.DiscordService.SetPageState("Каталог сборок", "Выбирает модпак");
+                    break;
+                case ModsPage:
+                    ViewModel.DiscordService.SetPageState("Менеджер модов", "Поиск дополнений");
+                    break;
+                case ScreenshotsPage:
+                    ViewModel.DiscordService.SetPageState("Галерея скриншотов", "Просматривает снимки");
+                    break;
+                case ProfileManagerPage profilePage:
+                    string packName = profilePage.ViewModel?.Profile?.Name ?? "Модпак";
+                    ViewModel.DiscordService.SetPageState("Управление сборкой", $"Редактирует «{packName}»");
+                    break;
+                default:
+                    ViewModel.DiscordService.SetPageState("В лаунчере", "Просмотр раздела");
+                    break;
+            }
+        }
+
+        public void CloseSettings()
+        {
+            MainFrame.Visibility = Visibility.Collapsed;
+            MainFrame.Content = null;
+
+            ViewModel.ApplyCustomWallpaper();
+            _ = ViewModel.LoadAccountsAsync();
+            _ = ViewModel.LoadVersionsAsync();
+
+            ViewModel.DiscordService.SetMenuState(ViewModel.SelectedVersion);
+
+            HomeView.Opacity = 0;
+            HomeView.Visibility = Visibility.Visible;
+
+            var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200));
+            HomeView.BeginAnimation(UIElement.OpacityProperty, fadeIn);
+        }
+
+        public void ReloadLauncher()
+        {
+            ViewModel.ApplyCustomWallpaper();
+            _ = ViewModel.LoadAccountsAsync();
+            _ = ViewModel.LoadVersionsAsync();
+        }
+
+        public void OpenModpackOverlay()
+        {
+            if (ViewModel.VanillaVersions.Count > 0 && string.IsNullOrEmpty(ViewModel.NewModpackVersion))
+            {
+                ViewModel.NewModpackVersion = ViewModel.VanillaVersions[0];
+            }
+
+            ViewModel.IsModpackOverlayVisible = true;
+        }
+
+        private void AnimateOpenModpackOverlay()
+        {
+            ViewModel.DiscordService.SetPageState("Создание сборки", "Настраивает параметры");
+
+            ModpackOverlay.Visibility = Visibility.Visible;
+            ModpackOverlay.IsHitTestVisible = true;
+
+            var fadeOverlay = new DoubleAnimation
+            {
+                From = 0.0,
+                To = 1.0,
+                Duration = TimeSpan.FromMilliseconds(220),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
+            ModpackOverlay.BeginAnimation(UIElement.OpacityProperty, fadeOverlay);
 
-            _launcher.ByteProgressChanged += (s, args) =>
+            var scaleAnim = new DoubleAnimation
             {
-                var now = DateTime.Now;
-                var timeDiff = (now - _lastTime).TotalSeconds;
-
-                if (timeDiff >= 0.5 && args.ProgressedBytes >= _lastBytes)
-                {
-                    double bytesPerSec = (args.ProgressedBytes - _lastBytes) / timeDiff;
-                    double speedMb = bytesPerSec / 1048576.0;
-                    _currentSpeedStr = speedMb >= 1 ? $"{speedMb:F1} МБ/с" : $"{(bytesPerSec / 1024.0):F0} КБ/с";
-                    _lastBytes = args.ProgressedBytes;
-                    _lastTime = now;
-                }
-
-                Dispatcher.Invoke(() =>
-                {
-                    if (ActionOverlay.Visibility == Visibility.Visible && !string.IsNullOrEmpty(_currentSpeedStr))
-                    {
-                        ActionOverlayText.Text = $"Загрузка компонентов • {_currentSpeedStr}";
-                    }
-
-                    if (args.TotalBytes > 0)
-                    {
-                        double percent = (double)args.ProgressedBytes / args.TotalBytes;
-                        int percentInt = (int)(percent * 100);
-
-                        if (ProgressFillBorder.Parent is Grid parentGrid)
-                            ProgressFillBorder.Width = percent * parentGrid.ActualWidth;
-
-                        double progMb = args.ProgressedBytes / 1048576.0;
-                        double totMb = args.TotalBytes / 1048576.0;
-                        string progStr = progMb >= 1024 ? $"{(progMb / 1024.0):F1} ГБ" : $"{progMb:F1} МБ";
-                        string totStr = totMb >= 1024 ? $"{(totMb / 1024.0):F1} ГБ" : $"{totMb:F1} МБ";
-
-                        ProgressTextBlock.Text = $"{progStr} / {totStr} ({percentInt}%) • {_currentSpeedStr}";
-                    }
-                });
+                From = 0.90,
+                To = 1.0,
+                Duration = TimeSpan.FromMilliseconds(260),
+                EasingFunction = new BackEase { Amplitude = 0.25, EasingMode = EasingMode.EaseOut }
             };
+            ModpackScaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+            ModpackScaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
 
-            await LoadVersionsAsync();
-            CheckForQuickPlay();
+            var slideAnim = new DoubleAnimation
+            {
+                From = 25,
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(260),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            ModpackTranslateTransform.BeginAnimation(TranslateTransform.YProperty, slideAnim);
         }
 
-        private async Task<string> GetOrInstallJavaAsync(string gameVersion)
+        private void AnimateCloseModpackOverlay()
         {
-            var settings = SettingsManager.Load();
+            ModpackOverlay.IsHitTestVisible = false;
 
-            if (!string.IsNullOrWhiteSpace(settings.JavaPath) && File.Exists(settings.JavaPath))
-                return settings.JavaPath;
-
-            int javaVersion = 8;
-            var match = Regex.Match(gameVersion, @"1\.(\d+)(?:\.(\d+))?");
-            if (match.Success)
+            var fadeOverlay = new DoubleAnimation
             {
-                int minor = int.Parse(match.Groups[1].Value);
-                int patch = match.Groups[2].Success ? int.Parse(match.Groups[2].Value) : 0;
-
-                if (minor >= 21 || (minor == 20 && patch >= 5)) javaVersion = 21;
-                else if (minor >= 17) javaVersion = 17;
-            }
-            else if (Regex.IsMatch(gameVersion, @"2[3-9]w\d+[a-z]")) javaVersion = 21;
-
-            string runtimesFolder = Path.Combine(settings.GamePath, "runtimes");
-            string javaFolder = Path.Combine(runtimesFolder, $"jre{javaVersion}");
-
-            if (Directory.Exists(javaFolder))
+                From = ModpackOverlay.Opacity,
+                To = 0.0,
+                Duration = TimeSpan.FromMilliseconds(160),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            };
+            fadeOverlay.Completed += (s, e) =>
             {
-                var files = Directory.GetFiles(javaFolder, "javaw.exe", SearchOption.AllDirectories);
-                if (files.Length > 0) return files[0];
-            }
-
-            Directory.CreateDirectory(javaFolder);
-            string zipPath = Path.Combine(runtimesFolder, $"java{javaVersion}.zip");
-            string downloadUrl = $"https://api.adoptium.net/v3/binary/latest/{javaVersion}/ga/windows/x64/jre/hotspot/normal/eclipse";
-
-            Dispatcher.Invoke(() => ProgressTextBlock.Text = $"Скачивание Java {javaVersion}...");
-
-            var response = await SharedHttpClient.GetAsync(downloadUrl);
-            response.EnsureSuccessStatusCode();
-
-            using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
-            {
-                await response.Content.CopyToAsync(fs);
-            }
-
-            Dispatcher.Invoke(() => ProgressTextBlock.Text = $"Распаковка Java {javaVersion}...");
-            ZipFile.ExtractToDirectory(zipPath, javaFolder, true);
-            File.Delete(zipPath);
-
-            var newFiles = Directory.GetFiles(javaFolder, "javaw.exe", SearchOption.AllDirectories);
-            if (newFiles.Length > 0) return newFiles[0];
-
-            throw new Exception($"Не удалось найти java.exe после установки Java {javaVersion}!");
-        }
-
-        private async Task LoadTelegramNewsAsync()
-        {
-            try
-            {
-                string primaryUrl = "https://t.me/s/QLauncher_MC";
-                string fallbackUrl = "https://tg.rip/s/QLauncher_MC";
-
-                string html = await AntiBlockManager.FetchWithFallbackAsync(SharedHttpClient, primaryUrl, fallbackUrl);
-                HtmlDocument doc = new HtmlDocument();
-                doc.LoadHtml(html);
-
-                var posts = new List<TelegramPost>();
-                var messageNodes = doc.DocumentNode.SelectNodes("//div[contains(@class, 'tgme_widget_message_wrap')]");
-
-                if (messageNodes != null)
+                if (!ViewModel.IsModpackOverlayVisible)
                 {
-                    foreach (var node in messageNodes)
+                    ModpackOverlay.Visibility = Visibility.Collapsed;
+                    if (MainFrame.Visibility == Visibility.Visible && MainFrame.Content != null)
                     {
-                        var textNode = node.SelectSingleNode(".//div[contains(@class, 'tgme_widget_message_text')]");
-                        var dateNode = node.SelectSingleNode(".//time");
-                        var photoWrap = node.SelectSingleNode(".//a[contains(@class, 'tgme_widget_message_photo_wrap')]");
-
-                        if (textNode != null || photoWrap != null)
-                        {
-                            string cleanText = "";
-                            if (textNode != null)
-                            {
-                                string rawText = textNode.InnerHtml.Replace("<br>", "\n").Replace("<br/>", "\n");
-                                cleanText = HttpUtility.HtmlDecode(rawText);
-                                HtmlDocument textDoc = new HtmlDocument();
-                                textDoc.LoadHtml(cleanText);
-                                cleanText = textDoc.DocumentNode.InnerText.Trim();
-                            }
-
-                            string imageUrl = "";
-                            if (photoWrap != null)
-                            {
-                                string style = photoWrap.GetAttributeValue("style", "");
-                                var match = Regex.Match(style, @"url\('(.*?)'\)");
-                                if (match.Success) imageUrl = match.Groups[1].Value;
-                            }
-
-                            posts.Add(new TelegramPost { Text = cleanText, Date = dateNode != null ? dateNode.InnerText : "Недавно", ImageUrl = imageUrl });
-                        }
-                    }
-                }
-                posts.Reverse();
-                Dispatcher.Invoke(() => { NewsItemsControl.ItemsSource = posts; });
-
-            }
-            catch (Exception)
-            {
-                Dispatcher.Invoke(() => { NewsItemsControl.ItemsSource = new List<TelegramPost> { new TelegramPost { Date = "Ошибка", Text = "Не удалось загрузить новости." } }; });
-            }
-        }
-
-        
-        
-        private async Task LoadVersionsAsync()
-        {
-            ProgressTextBlock.Text = "Получение списка версий...";
-            try
-            {
-                VersionComboBox.Items.Clear();
-                var settings = SettingsManager.Load();
-
-                VersionComboBox.Items.Add("➕ Создать новую сборку...");
-
-                foreach (var pack in settings.Modpacks) VersionComboBox.Items.Add($"⭐ {pack.Name} ({pack.Loader})");
-
-                var versions = await _launcher.GetAllVersionsAsync();
-                foreach (var version in versions) if (version.Type == "release") VersionComboBox.Items.Add(version.Name);
-
-                if (VersionComboBox.Items.Count > 1)
-                {
-                    if (!string.IsNullOrEmpty(settings.LastSelectedVersion) && VersionComboBox.Items.Contains(settings.LastSelectedVersion))
-                    {
-                        VersionComboBox.SelectedItem = settings.LastSelectedVersion;
+                        UpdateDiscordForPage(MainFrame.Content);
                     }
                     else
                     {
-                        VersionComboBox.SelectedIndex = 1;
-                    }
-                    ProgressTextBlock.Text = "Готов к запуску";
-                }
-            }
-            catch (Exception) { }
-        }
-
-        private void VersionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (VersionComboBox.SelectedItem != null)
-            {
-                string selectedStr = VersionComboBox.SelectedItem.ToString()!;
-                var settings = SettingsManager.Load();
-
-                if (selectedStr.StartsWith("➕"))
-                {
-                    OpenModpackOverlay_Click(sender, e);
-                    if (!string.IsNullOrEmpty(settings.LastSelectedVersion) && VersionComboBox.Items.Contains(settings.LastSelectedVersion))
-                    {
-                        VersionComboBox.SelectedItem = settings.LastSelectedVersion;
-                    }
-                    return;
-                }
-
-                settings.LastSelectedVersion = selectedStr;
-                SettingsManager.Save(settings);
-            }
-        }
-
-        private void NicknameComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            // Теперь в списке лежат объекты AccountProfile, а не просто текст
-            if (NicknameComboBox.SelectedItem is AccountProfile selectedAcc)
-            {
-                var settings = SettingsManager.Load();
-                settings.ActiveAccount = selectedAcc.Nickname; // Сохраняем ник
-                SettingsManager.Save(settings);
-            }
-        }
-
-        // Открытие и закрытие оверлея с плавной анимацией
-        public async void OpenShortcutOverlay_Click(object sender, RoutedEventArgs e)
-        {
-            ShortcutVersionBox.ItemsSource = VersionComboBox.Items;
-            if (VersionComboBox.SelectedItem != null) ShortcutVersionBox.SelectedItem = VersionComboBox.SelectedItem;
-
-            await FadeInElement(ShortcutOverlay, 200);
-        }
-
-        private async void CloseShortcutOverlay_Click(object sender, RoutedEventArgs e)
-        {
-            await FadeOutElement(ShortcutOverlay, 200);
-        }
-
-        // Кнопка СОЗДАТЬ ярлык
-        private void CreateShortcutBtn_Click(object sender, RoutedEventArgs e)
-        {
-            if (ShortcutVersionBox.SelectedItem == null || string.IsNullOrWhiteSpace(ShortcutIpBox.Text))
-            {
-                QMessageBoxWindow.Show("Заполните все поля!", "Внимание", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            string version = ShortcutVersionBox.SelectedItem.ToString();
-            string ip = ShortcutIpBox.Text.Trim();
-
-            try
-            {
-                // Заменяем двоеточие на нижнее подчеркивание, чтобы Windows не ругалась на имя файла
-                string safeIpForFileName = ip.Replace(":", "_");
-
-                // Получаем путь к рабочему столу и нашему лаунчеру
-                string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                string shortcutPath = Path.Combine(desktopPath, $"Играть на {safeIpForFileName}.lnk");
-                string exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-
-                // Создаем системный COM-объект Windows для ярлыков
-                Type t = Type.GetTypeFromProgID("WScript.Shell");
-                dynamic shell = Activator.CreateInstance(t);
-                dynamic shortcut = shell.CreateShortcut(shortcutPath);
-
-                // Настраиваем ярлык
-                shortcut.TargetPath = exePath;
-
-                // ВАЖНО: В аргументы мы передаем оригинальный IP с двоеточием, лаунчер его поймет!
-                shortcut.Arguments = $"-quickplay \"{version}\" \"{ip}\"";
-
-                shortcut.IconLocation = exePath + ",0"; // Берем иконку от нашего лаунчера
-                shortcut.WorkingDirectory = Path.GetDirectoryName(exePath);
-                shortcut.Save();
-
-                CloseShortcutOverlay_Click(null, null);
-                QMessageBoxWindow.Show($"Ярлык успешно создан на рабочем столе!\nОн автоматически запустит {version} и зайдет на {ip}.", "Готово", MessageBoxButton.OK, MessageBoxImage.Information);
-            }
-            catch (Exception ex)
-            {
-                QMessageBoxWindow.Show($"Ошибка создания ярлыка: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        private async void PlayButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (VersionComboBox.SelectedItem == null)
-            {
-                QMessageBoxWindow.Show("Пожалуйста, выберите версию игры!", "Внимание", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            string launchVersion = VersionComboBox.SelectedItem.ToString() ?? "";
-            if (launchVersion.StartsWith("➕"))
-            {
-                OpenModpackOverlay_Click(sender, e);
-                return;
-            }
-
-            // Запускаем игру!
-            await StartGame(launchVersion, null);
-        }
-
-        private async Task StartGame(string launchVersion, string autoJoinServerIp = null)
-        {
-            var settings = SettingsManager.Load();
-            var selectedAcc = settings.Accounts.Find(a => a.Nickname == settings.ActiveAccount) ??
-                             (settings.Accounts.Count > 0 ? settings.Accounts[0] : null);
-
-            if (selectedAcc == null) { QMessageBoxWindow.Show("Выберите аккаунт!"); return; }
-
-            string packName = launchVersion.StartsWith("⭐") ? launchVersion.Replace("⭐", "").Trim() : "vanilla";
-            if (packName.Contains(" (")) packName = packName.Substring(0, packName.LastIndexOf(" (")).Trim();
-
-            // 1. ИЗОЛЯЦИЯ МОДОВ (Подменяем папку перед запуском)
-            string sourceMods = Path.Combine(_minecraftPath.BasePath, "instances", packName, "mods");
-            string destMods = Path.Combine(_minecraftPath.BasePath, "mods");
-
-            try
-            {
-                if (Directory.Exists(destMods)) Directory.Delete(destMods, true);
-                Directory.CreateDirectory(destMods);
-                if (Directory.Exists(sourceMods))
-                {
-                    foreach (var file in Directory.GetFiles(sourceMods))
-                    {
-                        File.Copy(file, Path.Combine(destMods, Path.GetFileName(file)));
+                        ViewModel.DiscordService.SetMenuState(ViewModel.SelectedVersion);
                     }
                 }
-            }
-            catch { /* Игнорируем ошибки доступа, если моды не скопировались */ }
+            };
+            ModpackOverlay.BeginAnimation(UIElement.OpacityProperty, fadeOverlay);
 
-            // 2. Установка Fabric
-            string realVersionName = launchVersion;
-            if (launchVersion.StartsWith("⭐"))
+            var scaleAnim = new DoubleAnimation
             {
-                var pack = settings.Modpacks.Find(p => p.Name == packName);
-                if (pack != null && pack.Loader == "Fabric")
-                {
-                    string targetGameVer = !string.IsNullOrWhiteSpace(pack.GameVersion) ? pack.GameVersion : (!string.IsNullOrWhiteSpace(pack.Version) ? pack.Version : "1.20.1");
+                From = ModpackScaleTransform.ScaleX,
+                To = 0.94,
+                Duration = TimeSpan.FromMilliseconds(160),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            };
+            ModpackScaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+            ModpackScaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
 
-                    ActionOverlayText.Text = "Установка Fabric...";
-                    await FadeInElement(ActionOverlay, 300);
-                    try
-                    {
-                        var installer = new FabricInstaller(SharedHttpClient);
-                        await installer.Install(targetGameVer, new CmlLib.Core.MinecraftPath(_minecraftPath.BasePath));
-                        await _launcher.GetAllVersionsAsync();
-                        var dirInfo = new DirectoryInfo(Path.Combine(_minecraftPath.BasePath, "versions"));
-                        var foundDir = dirInfo.GetDirectories("fabric-loader-*").OrderByDescending(d => d.CreationTime).FirstOrDefault();
-                        if (foundDir != null) realVersionName = foundDir.Name;
-                    }
-                    catch (Exception)
-                    {
-                        try
-                        {
-                            // Обход блокировки провайдера / DPI через зеркало BMCLAPI (Без VPN)
-                            ActionOverlayText.Text = "Установка Fabric (Зеркало)...";
-                            string installedId = await AntiBlockManager.InstallFabricViaMirrorAsync(SharedHttpClient, targetGameVer, _minecraftPath.BasePath);
-                            await _launcher.GetAllVersionsAsync();
-                            realVersionName = installedId;
-                        }
-                        catch (Exception ex2)
-                        {
-                            ToastManager.ShowError($"Ошибка установки Fabric: {ex2.Message}", "Ошибка подключения");
-                            await FadeOutElement(ActionOverlay, 300);
-                            return;
-                        }
-                    }
-                }
-            }
-
-            // 3. ЗАПУСК
-            ActionOverlayText.Text = "Проверка Java...";
-            await FadeInElement(ActionOverlay, 300);
-            try
+            var slideAnim = new DoubleAnimation
             {
-                string javaPath = await JavaManager.ResolveJavaExecutableAsync(settings.JavaPath, launchVersion, status =>
-                {
-                    Dispatcher.Invoke(() => ActionOverlayText.Text = status);
-                });
-
-                var jvmArgs = JvmOptimizationHelper.GetOptimizedJvmArguments(settings.RamMb, settings.JvmPreset, settings.CustomJvmArgs);
-
-                var launchOption = new MLaunchOption
-                {
-                    MaximumRamMb = settings.RamMb,
-                    JavaPath = javaPath,
-                    ExtraJvmArguments = jvmArgs.Select(a => new MArgument(a)),
-                    ScreenWidth = settings.ScreenWidth,
-                    ScreenHeight = settings.ScreenHeight,
-                    FullScreen = settings.IsFullScreen,
-                    Session = selectedAcc.AccessToken != "offline"
-                        ? new MSession(selectedAcc.Nickname, selectedAcc.AccessToken, selectedAcc.Uuid)
-                        : MSession.CreateOfflineSession(selectedAcc.Nickname)
-                };
-
-                if (!string.IsNullOrWhiteSpace(autoJoinServerIp))
-                {
-                    string ip = autoJoinServerIp;
-                    int port = 25565;
-                    if (ip.Contains(':'))
-                    {
-                        var parts = ip.Split(':');
-                        ip = parts[0];
-                        int.TryParse(parts[1], out port);
-                    }
-                    launchOption.ServerIp = ip;
-                    launchOption.ServerPort = port;
-                }
-
-                ActionOverlayText.Text = "Подготовка процесса игры...";
-                var process = await _launcher.CreateProcessAsync(realVersionName, launchOption);
-
-                if (_consoleWindow == null || !_consoleWindow.IsLoaded)
-                {
-                    _consoleWindow = new GameConsoleWindow();
-                }
-                _consoleWindow.AttachProcess(process);
-                _consoleWindow.Show();
-
-                process.Start();
-                SoundManager.PlayLaunchSound();
-
-                DateTime startTime = DateTime.Now;
-
-                _ = Task.Run(() =>
-                {
-                    try
-                    {
-                        process.WaitForExit();
-                        var endTime = DateTime.Now;
-                        long minutesPlayed = (long)(endTime - startTime).TotalMinutes;
-
-                        var latestSettings = SettingsManager.Load();
-                        string curSel = "";
-                        Dispatcher.Invoke(() => curSel = VersionComboBox.SelectedItem?.ToString() ?? "");
-
-                        var pack = latestSettings.Modpacks.Find(p => p.Name == curSel);
-                        if (pack != null)
-                        {
-                            pack.PlaytimeMinutes += Math.Max(0, minutesPlayed);
-                            pack.LaunchCount += 1;
-                            SettingsManager.Save(latestSettings);
-                        }
-                    }
-                    catch { }
-                });
-
-                if (settings.CloseOnLaunch)
-                {
-                    this.Hide();
-                }
-            }
-            catch (Exception ex) { QMessageBoxWindow.Show($"Ошибка запуска: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error); }
-            finally { await FadeOutElement(ActionOverlay, 300); }
+                From = ModpackTranslateTransform.Y,
+                To = 15,
+                Duration = TimeSpan.FromMilliseconds(160),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            };
+            ModpackTranslateTransform.BeginAnimation(TranslateTransform.YProperty, slideAnim);
         }
 
-        private GameConsoleWindow? _consoleWindow;
-
-        private void ConsoleButton_Click(object sender, RoutedEventArgs e)
+        public void OpenShortcutOverlay()
         {
+            ViewModel.ShortcutVersion = ViewModel.SelectedVersion;
+            ViewModel.IsShortcutOverlayVisible = true;
+        }
+
+        public void SelectVersionByTag(string packTag)
+        {
+            if (ViewModel.Versions.Contains(packTag))
+            {
+                ViewModel.SelectedVersion = packTag;
+            }
+        }
+
+        private void UpdateThemeUi()
+        {
+            if (ThemeToggleBtn != null)
+            {
+                ThemeToggleBtn.Content = ThemeService.Instance.IsDarkTheme ? "\uE706" : "\uE708";
+                ThemeToggleBtn.ToolTip = ThemeService.Instance.IsDarkTheme ? "Переключить на светлую тему" : "Переключить на тёмную тему";
+            }
+        }
+
+        private void ThemeToggleBtn_Click(object sender, RoutedEventArgs e)
+        {
+            ViewModel.ToggleThemeCommand.Execute(null);
+        }
+
+        private void SettingsButton_Click(object sender, RoutedEventArgs e) =>
+            AnimateNavigate(new SettingsPage());
+
+        private void NavHome_Click(object sender, RoutedEventArgs e)
+        {
+            AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
+            CloseSettings();
+        }
+
+        private void NavModpacks_Click(object sender, RoutedEventArgs e)
+        {
+            AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
+            AnimateNavigate(new ModpacksPage());
+        }
+
+        private void NavMods_Click(object sender, RoutedEventArgs e)
+        {
+            AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
+            AnimateNavigate(new ModsPage());
+        }
+
+        private void NavScreenshots_Click(object sender, RoutedEventArgs e)
+        {
+            AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
+            AnimateNavigate(new ScreenshotsPage(SettingsService.Instance.Settings.GamePath));
+        }
+
+        private void NavConsole_Click(object sender, RoutedEventArgs e)
+        {
+            AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
             if (_consoleWindow == null || !_consoleWindow.IsLoaded)
             {
                 _consoleWindow = new GameConsoleWindow();
@@ -915,493 +412,39 @@ namespace MinecraftLauncher
             _consoleWindow.Activate();
         }
 
-        private void ProfileManagerButton_Click(object sender, RoutedEventArgs e)
+        private void VersionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            var settings = SettingsManager.Load();
-            if (settings.Modpacks.Count == 0)
+            if (VersionComboBox.SelectedItem is string selectedStr && selectedStr.Contains("Создать новую сборку"))
             {
-                QMessageBoxWindow.Show("У вас пока нет созданных сборок! Создайте сборку кнопкой '+' внизу.", "Внимание", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            string selected = VersionComboBox.SelectedItem?.ToString() ?? "";
-            ModpackProfile? selectedPack = null;
-
-            if (selected.StartsWith("⭐"))
-            {
-                string packName = selected.Replace("⭐", "").Trim();
-                if (packName.Contains(" (")) packName = packName.Substring(0, packName.LastIndexOf(" (")).Trim();
-                selectedPack = settings.Modpacks.Find(p => p.Name == packName);
-            }
-
-            if (selectedPack == null) selectedPack = settings.Modpacks[0];
-
-            AnimateNavigate(new ProfileManagerPage(selectedPack));
-        }
-
-        private void ScreenshotsButton_Click(object sender, RoutedEventArgs e)
-        {
-            var settings = SettingsManager.Load();
-            AnimateNavigate(new ScreenshotsPage(settings.GamePath));
-        }
-
-        private async void ConnectServer_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is Button btn && btn.Tag is string ip && !string.IsNullOrWhiteSpace(ip))
-            {
-                if (VersionComboBox.SelectedItem == null && VersionComboBox.Items.Count > 0)
+                OpenModpackOverlay();
+                string lastVer = SettingsService.Instance.Settings.LastSelectedVersion;
+                if (!string.IsNullOrEmpty(lastVer) && ViewModel.Versions.Contains(lastVer))
                 {
-                    VersionComboBox.SelectedIndex = 0;
-                }
-
-                string selectedVersion = VersionComboBox.SelectedItem?.ToString() ?? "1.20.1";
-                await StartGame(selectedVersion, ip);
-            }
-        }
-
-        private void ImportZipModpack_Click(object sender, RoutedEventArgs e)
-        {
-            var dlg = new Microsoft.Win32.OpenFileDialog
-            {
-                Filter = "Zip Archive (*.zip)|*.zip"
-            };
-
-            if (dlg.ShowDialog() == true)
-            {
-                try
-                {
-                    string packName = Path.GetFileNameWithoutExtension(dlg.FileName);
-                    var settings = SettingsManager.Load();
-
-                    string instancesPath = Path.Combine(settings.GamePath, "instances", packName);
-                    if (Directory.Exists(instancesPath))
-                    {
-                        packName += "_" + DateTime.Now.ToString("HHmmss");
-                        instancesPath = Path.Combine(settings.GamePath, "instances", packName);
-                    }
-
-                    Directory.CreateDirectory(instancesPath);
-                    ZipFile.ExtractToDirectory(dlg.FileName, instancesPath, true);
-
-                    settings.Modpacks.Add(new ModpackProfile
-                    {
-                        Name = packName,
-                        GameVersion = "1.20.1",
-                        Loader = "Custom",
-                        FolderPath = instancesPath
-                    });
-
-                    SettingsManager.Save(settings);
-                    CloseModpackOverlay_Click(null, null);
-                    ReloadLauncher();
-
-                    QMessageBoxWindow.Show($"Сборка '{packName}' успешно импортирована из Zip!", "Успех", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-                catch (Exception ex)
-                {
-                    QMessageBoxWindow.Show($"Ошибка импорта сборки: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                    ViewModel.SelectedVersion = lastVer;
                 }
             }
         }
 
-        private async Task DownloadModrinthModAsync(string slug, string gameVersion, string modsPath)
-        {
-            try
-            {
-                SharedHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("QLauncher_By_dyagnostic");
-                string url = $"https://api.modrinth.com/v2/project/{slug}/version?game_versions=[\"{gameVersion}\"]&loaders=[\"fabric\"]";
+        private void CloseModpackOverlay_Click(object sender, MouseButtonEventArgs e) =>
+            ViewModel.IsModpackOverlayVisible = false;
 
-                string json = await SharedHttpClient.GetStringAsync(url);
-                using JsonDocument doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-
-                if (root.GetArrayLength() > 0)
-                {
-                    var firstVersion = root[0];
-                    var files = firstVersion.GetProperty("files");
-                    if (files.GetArrayLength() > 0)
-                    {
-                        string downloadUrl = files[0].GetProperty("url").GetString() ?? "";
-                        string fileName = files[0].GetProperty("filename").GetString() ?? "";
-                        string filePath = Path.Combine(modsPath, fileName);
-
-                        byte[] fileBytes = await SharedHttpClient.GetByteArrayAsync(downloadUrl);
-                        File.WriteAllBytes(filePath, fileBytes);
-                    }
-                }
-            }
-            catch (Exception) { }
-        }
-
-        private async void CreateModpackBtn_Click(object sender, RoutedEventArgs e)
-        {
-            string packName = ModpackNameBox.Text.Trim();
-            string gameVersion = ModpackVersionBox.SelectedItem?.ToString() ?? "";
-            string loader = ((ComboBoxItem)ModLoaderBox.SelectedItem)?.Content.ToString() ?? "Vanilla";
-
-            bool sodium = InstallSodiumCheck.IsChecked ?? false;
-            bool iris = InstallIrisCheck.IsChecked ?? false;
-
-            if (string.IsNullOrWhiteSpace(packName) || string.IsNullOrWhiteSpace(gameVersion))
-            {
-                QMessageBoxWindow.Show("Введите название сборки и выберите версию!", "Внимание");
-                return;
-            }
-
-            var settings = SettingsManager.Load();
-            if (settings.Modpacks.Exists(m => m.Name == packName))
-            {
-                QMessageBoxWindow.Show("Сборка с таким именем уже существует!", "Ошибка");
-                return;
-            }
-
-            string instancesPath = Path.Combine(settings.GamePath, "instances", packName);
-            Directory.CreateDirectory(instancesPath);
-
-            if (loader == "Fabric")
-            {
-                string modsPath = Path.Combine(instancesPath, "mods");
-                Directory.CreateDirectory(modsPath);
-
-                if (sodium) await DownloadModrinthModAsync("sodium", gameVersion, modsPath);
-                if (iris) await DownloadModrinthModAsync("iris", gameVersion, modsPath);
-            }
-
-            settings.Modpacks.Add(new ModpackProfile { Name = packName, GameVersion = gameVersion, Version = gameVersion, Loader = loader, FolderPath = instancesPath });
-            SettingsManager.Save(settings);
-            ReloadLauncher();
-
-            MessageBox.Show($"Сборка '{packName}' успешно создана!", "Успех", MessageBoxButton.OK, MessageBoxImage.Information);
-            await FadeOutElement(ModpackOverlay, 200);
-            ModpackOverlay.Visibility = Visibility.Collapsed;
-        }
-
-        public void DeleteModpackBtn_Click(object sender, RoutedEventArgs e)
-        {
-            if (VersionComboBox.SelectedItem == null) return;
-            string selectedItem = VersionComboBox.SelectedItem.ToString() ?? "";
-
-            if (!selectedItem.StartsWith("⭐ "))
-            {
-                QMessageBoxWindow.Show("Вы можете удалить только созданные вами сборки!", "Внимание", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            string packName = selectedItem.Substring(2, selectedItem.LastIndexOf('(') - 3);
-
-            var result = QMessageBoxWindow.Show($"Вы действительно хотите удалить сборку '{packName}'?\nВсе сохранения, моды и настройки внутри этой сборки будут безвозвратно удалены!",
-                                         "Подтверждение удаления", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-
-            if (result == MessageBoxResult.Yes)
-            {
-                var settings = SettingsManager.Load();
-                var modpack = settings.Modpacks.Find(p => p.Name == packName);
-
-                if (modpack != null)
-                {
-                    try
-                    {
-                        if (Directory.Exists(modpack.FolderPath))
-                        {
-                            Directory.Delete(modpack.FolderPath, true);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        QMessageBoxWindow.Show($"Не удалось удалить файлы с диска (возможно, они заняты другой программой): {ex.Message}", "Ошибка");
-                    }
-
-                    settings.Modpacks.Remove(modpack);
-                    SettingsManager.Save(settings);
-                    ReloadLauncher();
-
-                    QMessageBoxWindow.Show("Сборка успешно удалена!", "Успех", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-            }
-        }
-
-        private Task FadeOutElement(UIElement element, double durationMs = 200)
-        {
-            var tcs = new TaskCompletionSource<bool>();
-            var anim = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(durationMs));
-            anim.Completed += (s, ev) => tcs.SetResult(true);
-            element.BeginAnimation(UIElement.OpacityProperty, anim);
-            return tcs.Task;
-        }
-
-        private Task FadeInElement(UIElement element, double durationMs = 200)
-        {
-            var tcs = new TaskCompletionSource<bool>();
-            var anim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(durationMs));
-            anim.Completed += (s, ev) => tcs.SetResult(true);
-            element.BeginAnimation(UIElement.OpacityProperty, anim);
-            return tcs.Task;
-        }
-
-        private async void SettingsButton_Click(object sender, RoutedEventArgs e)
-        {
-            AnimateNavigate(new SettingsPage());
-        }
-
-        // Метод для обновления списков и интерфейса
-        public void ReloadLauncher()
-        {
-            _ = InitializeLauncherAsync();
-        }
-
-        // Метод для закрытия настроек и возврата на главную
-        public async void CloseSettings()
-        {
-            await FadeOutElement(MainFrame, 200);
-            MainFrame.Visibility = Visibility.Collapsed;
-            MainFrame.Content = null;
-
-            ApplyCustomWallpaper();
-            ReloadLauncher(); // Обновляем списки (ники, сборки)
-
-            HomeView.Opacity = 0;
-            HomeView.Visibility = Visibility.Visible;
-            await FadeInElement(HomeView, 200);
-        }
-
-        public async void OpenModpackOverlay_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is Button btn) btn.IsEnabled = false;
-            ModpackVersionBox.Items.Clear();
-            foreach (var item in VersionComboBox.Items) if (!item.ToString()!.StartsWith("⭐") && !item.ToString()!.StartsWith("➕")) ModpackVersionBox.Items.Add(item);
-            if (ModpackVersionBox.Items.Count > 0) ModpackVersionBox.SelectedIndex = 0;
-            ModpackOverlay.Opacity = 0;
-            ModpackOverlay.Visibility = Visibility.Visible;
-            await FadeInElement(ModpackOverlay, 200);
-            if (sender is Button btnReEn) btnReEn.IsEnabled = true;
-        }
-
-        private async void CloseModpackOverlay_Click(object sender, RoutedEventArgs e)
-        {
-            await FadeOutElement(ModpackOverlay, 200);
-            ModpackOverlay.Visibility = Visibility.Collapsed;
-        }
-
-        private void ModLoaderBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (FabricOptionsPanel == null) return;
-            if (ModLoaderBox.SelectedItem is ComboBoxItem selectedItem && selectedItem.Content.ToString() == "Fabric") FabricOptionsPanel.Visibility = Visibility.Visible;
-            else FabricOptionsPanel.Visibility = Visibility.Collapsed;
-        }
-
-        private async void ModsButton_Click(object sender, RoutedEventArgs e)
-        {
-            AnimateNavigate(new ModsPage());
-        }
-
-        private void Window_MouseDown(object sender, MouseButtonEventArgs e)
-        {
-            if (e.ChangedButton == MouseButton.Left)
-            {
-                if (e.ClickCount == 2) MaximizeButton_Click(sender, e);
-                else
-                {
-                    if (_isCustomMaximized)
-                    {
-                        ClearAnimations();
-                        Point clickPos = e.GetPosition(this);
-                        double ratio = clickPos.X / this.ActualWidth;
-                        this.Width = _normalWidth; this.Height = _normalHeight;
-                        this.Left = this.Left + clickPos.X - (_normalWidth * ratio);
-                        this.Top = this.Top + clickPos.Y - clickPos.Y;
-                        if (OuterBorder != null) OuterBorder.CornerRadius = new CornerRadius(14);
-                        if (TitleBorder != null) TitleBorder.CornerRadius = new CornerRadius(10, 10, 0, 0);
-                        if (CloseBtn != null) CloseBtn.Tag = new CornerRadius(0, 10, 0, 0);
-                        _isCustomMaximized = false;
-                    }
-                    DragMove();
-                }
-            }
-        }
-
-        private void MinimizeButton_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
-        private void CloseButton_Click(object sender, RoutedEventArgs e)
-        {
-            // Отключаем Discord, чтобы убрать статус "Играет" перед закрытием лаунчера
-            DiscordManager.StopRpc();
-
-            // Полностью закрываем приложение
-            Application.Current.Shutdown();
-        }
-
-        private void ClearAnimations()
-        {
-            this.BeginAnimation(Window.LeftProperty, null);
-            this.BeginAnimation(Window.TopProperty, null);
-            this.BeginAnimation(Window.WidthProperty, null);
-            this.BeginAnimation(Window.HeightProperty, null);
-            OuterBorder?.BeginAnimation(Border.CornerRadiusProperty, null);
-            TitleBorder?.BeginAnimation(Border.CornerRadiusProperty, null);
-        }
-
-        private void AnimateCorners(Border border, CornerRadius to, TimeSpan duration, IEasingFunction ease)
-        {
-            CornerRadiusAnimation anim = new CornerRadiusAnimation { From = border.CornerRadius, To = to, Duration = duration, EasingFunction = ease };
-            border.BeginAnimation(Border.CornerRadiusProperty, anim);
-        }
-
-        private void MaximizeButton_Click(object sender, RoutedEventArgs e)
-        {
-            TimeSpan duration = TimeSpan.FromMilliseconds(250);
-            var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
-
-            if (!_isCustomMaximized)
-            {
-                _normalLeft = this.Left; _normalTop = this.Top; _normalWidth = this.Width; _normalHeight = this.Height;
-                this.BeginAnimation(Window.LeftProperty, new DoubleAnimation(SystemParameters.WorkArea.Left, duration) { EasingFunction = ease });
-                this.BeginAnimation(Window.TopProperty, new DoubleAnimation(SystemParameters.WorkArea.Top, duration) { EasingFunction = ease });
-                this.BeginAnimation(Window.WidthProperty, new DoubleAnimation(SystemParameters.WorkArea.Width, duration) { EasingFunction = ease });
-                this.BeginAnimation(Window.HeightProperty, new DoubleAnimation(SystemParameters.WorkArea.Height, duration) { EasingFunction = ease });
-                if (OuterBorder != null) AnimateCorners(OuterBorder, new CornerRadius(0), duration, ease);
-                if (TitleBorder != null) AnimateCorners(TitleBorder, new CornerRadius(0), duration, ease);
-                if (CloseBtn != null) CloseBtn.Tag = new CornerRadius(0);
-                _isCustomMaximized = true;
-            }
-            else
-            {
-                this.BeginAnimation(Window.LeftProperty, new DoubleAnimation(_normalLeft, duration) { EasingFunction = ease });
-                this.BeginAnimation(Window.TopProperty, new DoubleAnimation(_normalTop, duration) { EasingFunction = ease });
-                this.BeginAnimation(Window.WidthProperty, new DoubleAnimation(_normalWidth, duration) { EasingFunction = ease });
-                this.BeginAnimation(Window.HeightProperty, new DoubleAnimation(_normalHeight, duration) { EasingFunction = ease });
-                if (OuterBorder != null) AnimateCorners(OuterBorder, new CornerRadius(14), duration, ease);
-                if (TitleBorder != null) AnimateCorners(TitleBorder, new CornerRadius(10, 10, 0, 0), duration, ease);
-                if (CloseBtn != null) CloseBtn.Tag = new CornerRadius(0, 10, 0, 0);
-                _isCustomMaximized = false;
-            }
-        }
-
-        // === ЛОГИКА ТРЕЯ ===
-        private void LauncherTrayIcon_TrayMouseDoubleClick(object sender, RoutedEventArgs e)
-        {
-            RestoreLauncher();
-        }
-
-        private void TrayRestore_Click(object sender, RoutedEventArgs e)
-        {
-            RestoreLauncher();
-        }
-
-        private void TrayExit_Click(object sender, RoutedEventArgs e)
-        {
-            Application.Current.Shutdown();
-        }
-
-        private void RestoreLauncher()
-        {
-            this.Show();
-            this.WindowState = WindowState.Normal;
-            this.Activate();
-
-            LauncherTrayIcon.Visibility = Visibility.Collapsed;
-        }
-
-        // Универсальный метод плавного ПОЯВЛЕНИЯ
-        public async Task FadeInElement(UIElement element, int durationMs = 300)
-        {
-            element.Opacity = 0; // Делаем полностью прозрачным
-            element.Visibility = Visibility.Visible; // Включаем отображение
-
-            DoubleAnimation anim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(durationMs));
-            element.BeginAnimation(UIElement.OpacityProperty, anim);
-
-            await Task.Delay(durationMs); // Ждем, пока анимация не закончится
-        }
-
-        // Универсальный метод плавного ЗАТУХАНИЯ
-        public async Task FadeOutElement(UIElement element, int durationMs = 300)
-        {
-            DoubleAnimation anim = new DoubleAnimation(element.Opacity, 0, TimeSpan.FromMilliseconds(durationMs));
-            element.BeginAnimation(UIElement.OpacityProperty, anim);
-
-            await Task.Delay(durationMs); // Ждем окончания анимации
-            element.Visibility = Visibility.Collapsed; // Полностью выключаем элемент, чтобы он не перекрывал клики
-        }
-
-        #region Header Navigation Tabs
-
-        private void NavHome_Click(object sender, RoutedEventArgs e)
-        {
-            SoundManager.PlayClickSound();
-            CloseSettings();
-        }
-
-        private void NavMods_Click(object sender, RoutedEventArgs e)
-        {
-            SoundManager.PlayClickSound();
-            AnimateNavigate(new ModsPage());
-        }
-
-        private void NavProfile_Click(object sender, RoutedEventArgs e)
-        {
-            SoundManager.PlayClickSound();
-            ProfileManagerButton_Click(sender, e);
-        }
-
-        private void NavScreenshots_Click(object sender, RoutedEventArgs e)
-        {
-            SoundManager.PlayClickSound();
-            ScreenshotsButton_Click(sender, e);
-        }
-
-        private void NavConsole_Click(object sender, RoutedEventArgs e)
-        {
-            SoundManager.PlayClickSound();
-            ConsoleButton_Click(sender, e);
-        }
-
-        #endregion
-
-        #region Quick Folder Access & Drag and Drop
+        private void CloseShortcutOverlay_Click(object sender, MouseButtonEventArgs e) =>
+            ViewModel.IsShortcutOverlayVisible = false;
 
         private void QuickFolderButton_Click(object sender, RoutedEventArgs e)
         {
-            SoundManager.PlayClickSound();
-            if (sender is Button btn && btn.ContextMenu != null)
-            {
-                btn.ContextMenu.IsOpen = true;
-            }
+            AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
+            FoldersPopup.PlacementTarget = QuickFolderBtn;
+            FoldersPopup.IsOpen = !FoldersPopup.IsOpen;
         }
 
-        private void OpenTargetFolder(string subFolder)
-        {
-            var settings = SettingsManager.Load();
-            string targetDir = settings.GamePath;
-
-            string selectedPack = VersionComboBox.SelectedItem?.ToString() ?? "";
-            var modpack = settings.Modpacks.Find(p => p.Name == selectedPack);
-            if (modpack != null && Directory.Exists(modpack.FolderPath))
-            {
-                targetDir = modpack.FolderPath;
-            }
-
-            if (!string.IsNullOrEmpty(subFolder))
-            {
-                targetDir = Path.Combine(targetDir, subFolder);
-            }
-
-            Directory.CreateDirectory(targetDir);
-            try
-            {
-                Process.Start("explorer.exe", targetDir);
-            }
-            catch (Exception ex)
-            {
-                QMessageBoxWindow.Show($"Не удалось открыть папку:\n{ex.Message}", "Ошибка");
-            }
-        }
-
-        private void OpenFolder_Mods(object sender, RoutedEventArgs e) => OpenTargetFolder("mods");
-        private void OpenFolder_ResourcePacks(object sender, RoutedEventArgs e) => OpenTargetFolder("resourcepacks");
-        private void OpenFolder_ShaderPacks(object sender, RoutedEventArgs e) => OpenTargetFolder("shaderpacks");
-        private void OpenFolder_Saves(object sender, RoutedEventArgs e) => OpenTargetFolder("saves");
-        private void OpenFolder_Screenshots(object sender, RoutedEventArgs e) => OpenTargetFolder("screenshots");
-        private void OpenFolder_Logs(object sender, RoutedEventArgs e) => OpenTargetFolder("logs");
-        private void OpenFolder_Root(object sender, RoutedEventArgs e) => OpenTargetFolder("");
+        private void OpenFolder_Mods(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute("mods"); }
+        private void OpenFolder_ResourcePacks(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute("resourcepacks"); }
+        private void OpenFolder_ShaderPacks(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute("shaderpacks"); }
+        private void OpenFolder_Saves(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute("saves"); }
+        private void OpenFolder_Screenshots(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute("screenshots"); }
+        private void OpenFolder_Logs(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute("logs"); }
+        private void OpenFolder_Root(object sender, RoutedEventArgs e) { FoldersPopup.IsOpen = false; ViewModel.OpenQuickFolderCommand.Execute(""); }
 
         private void Window_DragOver(object sender, DragEventArgs e)
         {
@@ -1414,47 +457,165 @@ namespace MinecraftLauncher
 
         private void Window_Drop(object sender, DragEventArgs e)
         {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+
+            string[]? files = (string[])e.Data.GetData(DataFormats.FileDrop);
+            if (files == null || files.Length == 0) return;
+
+            var settings = SettingsService.Instance.Settings;
+            string targetModsDir = Path.Combine(settings.GamePath, "mods");
+
+            string selectedPack = ViewModel.SelectedVersion;
+            if (!string.IsNullOrEmpty(selectedPack) && selectedPack.StartsWith("⭐"))
             {
-                string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                if (files == null || files.Length == 0) return;
+                string packName = selectedPack.Replace("⭐", "").Trim();
+                if (packName.Contains(" (")) packName = packName.Substring(0, packName.LastIndexOf(" (")).Trim();
 
-                var settings = SettingsManager.Load();
-                string targetModsDir = Path.Combine(settings.GamePath, "mods");
-
-                string selectedPack = VersionComboBox.SelectedItem?.ToString() ?? "";
-                var modpack = settings.Modpacks.Find(p => p.Name == selectedPack);
+                var modpack = settings.Modpacks.Find(p => p.Name == packName);
                 if (modpack != null && Directory.Exists(modpack.FolderPath))
                 {
                     targetModsDir = Path.Combine(modpack.FolderPath, "mods");
                 }
+            }
 
-                Directory.CreateDirectory(targetModsDir);
+            Directory.CreateDirectory(targetModsDir);
 
-                int installedCount = 0;
-                foreach (string file in files)
+            int installedCount = 0;
+            foreach (string file in files)
+            {
+                string ext = Path.GetExtension(file).ToLowerInvariant();
+                if (ext == ".mrpack")
                 {
-                    string ext = Path.GetExtension(file).ToLowerInvariant();
-                    if (ext == ".jar" || ext == ".zip")
+                    _ = Task.Run(async () =>
                     {
-                        string destFile = Path.Combine(targetModsDir, Path.GetFileName(file));
-                        File.Copy(file, destFile, true);
-                        installedCount++;
-                    }
+                        try
+                        {
+                            Dispatcher.Invoke(() => ToastService.Instance.ShowInfo("Импорт перетащенной сборки .mrpack...", "Импорт"));
+                            var profile = await Services.LaunchEngine.MrPackInstaller.InstallMrPackAsync(file, settings.GamePath);
+                            settings.Modpacks.Add(profile);
+                            SettingsService.Instance.Save(settings);
+                            await Dispatcher.InvokeAsync(async () =>
+                            {
+                                await ViewModel.LoadVersionsAsync();
+                                ViewModel.SelectedVersion = $"⭐ {profile.Name} ({profile.Loader})";
+                                ToastService.Instance.ShowSuccess($"Сборка '{profile.Name}' успешно установлена!", "Импорт");
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Dispatcher.Invoke(() => ToastService.Instance.ShowError($"Ошибка импорта: {ex.Message}", "Ошибка"));
+                        }
+                    });
+                    return;
                 }
-
-                if (installedCount > 0)
+                else if (ext == ".jar" || ext == ".zip")
                 {
-                    SoundManager.PlayClickSound();
-                    QMessageBoxWindow.Show($"Успешно установлено {installedCount} модов в папку mods!", "Drag & Drop", MessageBoxButton.OK, MessageBoxImage.Information);
+                    string destFile = Path.Combine(targetModsDir, Path.GetFileName(file));
+                    File.Copy(file, destFile, true);
+                    installedCount++;
+                }
+            }
+
+            if (installedCount > 0)
+            {
+                AudioService.Instance.PlayClickSound(SettingsService.Instance.Settings.EnableUiSounds);
+                ToastService.Instance.ShowSuccess($"Установлено {installedCount} файлов в папку mods.", "Моды");
+            }
+        }
+
+        private void Window_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton == MouseButton.Left)
+            {
+                if (e.ClickCount == 2)
+                {
+                    MaximizeButton_Click(sender, e);
                 }
                 else
                 {
-                    QMessageBoxWindow.Show("Перетащите файлы с расширением .jar или .zip для установки модов.", "Внимание", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    if (_isCustomMaximized)
+                    {
+                        ClearAnimations();
+                        Point clickPos = e.GetPosition(this);
+                        double ratio = clickPos.X / ActualWidth;
+                        Width = _normalWidth;
+                        Height = _normalHeight;
+                        Left = Left + clickPos.X - (_normalWidth * ratio);
+                        Top = Top + clickPos.Y - clickPos.Y;
+                        if (OuterBorder != null) OuterBorder.CornerRadius = new CornerRadius(14);
+                        if (TitleBorder != null) TitleBorder.CornerRadius = new CornerRadius(10, 10, 0, 0);
+                        if (CloseBtn != null) CloseBtn.Tag = new CornerRadius(0, 10, 0, 0);
+                        _isCustomMaximized = false;
+                    }
+                    DragMove();
                 }
             }
         }
 
-        #endregion
+        private void MinimizeButton_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+
+        private void CloseButton_Click(object sender, RoutedEventArgs e)
+        {
+            DiscordService.Instance.StopRpc();
+            Application.Current.Shutdown();
+        }
+
+        private void ClearAnimations()
+        {
+            BeginAnimation(LeftProperty, null);
+            BeginAnimation(TopProperty, null);
+            BeginAnimation(WidthProperty, null);
+            BeginAnimation(HeightProperty, null);
+            OuterBorder?.BeginAnimation(Border.CornerRadiusProperty, null);
+            TitleBorder?.BeginAnimation(Border.CornerRadiusProperty, null);
+        }
+
+        private void MaximizeButton_Click(object sender, RoutedEventArgs e)
+        {
+            var duration = TimeSpan.FromMilliseconds(220);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
+
+            if (!_isCustomMaximized)
+            {
+                _normalLeft = Left; _normalTop = Top; _normalWidth = Width; _normalHeight = Height;
+                BeginAnimation(LeftProperty, new DoubleAnimation(SystemParameters.WorkArea.Left, duration) { EasingFunction = ease });
+                BeginAnimation(TopProperty, new DoubleAnimation(SystemParameters.WorkArea.Top, duration) { EasingFunction = ease });
+                BeginAnimation(WidthProperty, new DoubleAnimation(SystemParameters.WorkArea.Width, duration) { EasingFunction = ease });
+                BeginAnimation(HeightProperty, new DoubleAnimation(SystemParameters.WorkArea.Height, duration) { EasingFunction = ease });
+                if (OuterBorder != null) AnimateCorners(OuterBorder, new CornerRadius(0), duration, ease);
+                if (TitleBorder != null) AnimateCorners(TitleBorder, new CornerRadius(0), duration, ease);
+                if (CloseBtn != null) CloseBtn.Tag = new CornerRadius(0);
+                _isCustomMaximized = true;
+            }
+            else
+            {
+                BeginAnimation(LeftProperty, new DoubleAnimation(_normalLeft, duration) { EasingFunction = ease });
+                BeginAnimation(TopProperty, new DoubleAnimation(_normalTop, duration) { EasingFunction = ease });
+                BeginAnimation(WidthProperty, new DoubleAnimation(_normalWidth, duration) { EasingFunction = ease });
+                BeginAnimation(HeightProperty, new DoubleAnimation(_normalHeight, duration) { EasingFunction = ease });
+                if (OuterBorder != null) AnimateCorners(OuterBorder, new CornerRadius(14), duration, ease);
+                if (TitleBorder != null) AnimateCorners(TitleBorder, new CornerRadius(10, 10, 0, 0), duration, ease);
+                if (CloseBtn != null) CloseBtn.Tag = new CornerRadius(0, 10, 0, 0);
+                _isCustomMaximized = false;
+            }
+        }
+
+        private void AnimateCorners(Border border, CornerRadius to, TimeSpan duration, IEasingFunction ease)
+        {
+            var anim = new CornerRadiusAnimation { From = border.CornerRadius, To = to, Duration = duration, EasingFunction = ease };
+            border.BeginAnimation(Border.CornerRadiusProperty, anim);
+        }
+
+        private void LauncherTrayIcon_TrayMouseDoubleClick(object sender, RoutedEventArgs e) => RestoreLauncher();
+        private void TrayRestore_Click(object sender, RoutedEventArgs e) => RestoreLauncher();
+        private void TrayExit_Click(object sender, RoutedEventArgs e) => Application.Current.Shutdown();
+
+        private void RestoreLauncher()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+            LauncherTrayIcon.Visibility = Visibility.Collapsed;
+        }
     }
 }
