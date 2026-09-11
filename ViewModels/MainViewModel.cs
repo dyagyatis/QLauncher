@@ -322,7 +322,27 @@ namespace MinecraftLauncher.ViewModels
             {
                 try
                 {
-                    await _updateService.CheckForUpdatesAsync(isManual: false);
+                    var settings = _settingsService.Settings;
+                    if (!settings.CheckUpdatesOnStartup) return;
+
+                    var release = await _updateService.CheckForUpdatesAsync(isManual: false);
+                    if (release != null && release.HasUpdate)
+                    {
+                        if (!string.IsNullOrEmpty(settings.SkippedVersion) &&
+                            settings.SkippedVersion.Equals(release.TagName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return;
+                        }
+
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            var updateWindow = new Views.Windows.UpdateWindow(release)
+                            {
+                                Owner = Application.Current.MainWindow
+                            };
+                            updateWindow.ShowDialog();
+                        });
+                    }
                 }
                 catch { }
             });

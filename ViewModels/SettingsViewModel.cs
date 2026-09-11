@@ -39,6 +39,12 @@ namespace MinecraftLauncher.ViewModels
         private GpuOptionItem? _selectedGpuOption;
         private string _activeGpuSummary = "";
         private string _activeGpuDetails = "";
+        private bool _checkUpdatesOnStartup = true;
+        private bool _showSplashOnStartup = true;
+        private string _updateChannel = "stable";
+        private string _updateMirror = "auto";
+        private int _bandwidthLimitMbps = 0;
+        private bool _isCheckingUpdates = false;
 
         public ObservableCollection<AccountProfile> Accounts { get; } = new();
         public ObservableCollection<GpuOptionItem> GpuOptions { get; } = new();
@@ -240,6 +246,77 @@ namespace MinecraftLauncher.ViewModels
             }
         }
 
+        public bool CheckUpdatesOnStartup
+        {
+            get => _checkUpdatesOnStartup;
+            set
+            {
+                if (SetProperty(ref _checkUpdatesOnStartup, value)) SaveSettings();
+            }
+        }
+
+        public bool ShowSplashOnStartup
+        {
+            get => _showSplashOnStartup;
+            set
+            {
+                if (SetProperty(ref _showSplashOnStartup, value)) SaveSettings();
+            }
+        }
+
+        public string UpdateChannel
+        {
+            get => _updateChannel;
+            set
+            {
+                if (SetProperty(ref _updateChannel, value)) SaveSettings();
+            }
+        }
+
+        public string UpdateMirror
+        {
+            get => _updateMirror;
+            set
+            {
+                if (SetProperty(ref _updateMirror, value)) SaveSettings();
+            }
+        }
+
+        public int BandwidthLimitMbps
+        {
+            get => _bandwidthLimitMbps;
+            set
+            {
+                if (SetProperty(ref _bandwidthLimitMbps, value))
+                {
+                    OnPropertyChanged(nameof(BandwidthLimitTag));
+                    SaveSettings();
+                }
+            }
+        }
+
+        public string BandwidthLimitTag
+        {
+            get => _bandwidthLimitMbps.ToString();
+            set
+            {
+                if (int.TryParse(value, out int parsed))
+                {
+                    BandwidthLimitMbps = parsed;
+                }
+            }
+        }
+
+        public bool IsCheckingUpdates
+        {
+            get => _isCheckingUpdates;
+            set => SetProperty(ref _isCheckingUpdates, value);
+        }
+
+        public bool IsPortableMode => LauncherPathHelper.IsPortableMode;
+
+        public string CurrentVersionText => $"{UpdateService.CurrentVersion}{(IsPortableMode ? " (Портативный режим)" : "")}";
+
         public RelayCommand BrowseJavaCommand { get; }
         public RelayCommand ResetJavaCommand { get; }
         public RelayCommand BrowseWallpaperCommand { get; }
@@ -251,6 +328,8 @@ namespace MinecraftLauncher.ViewModels
         public RelayCommand<string> SelectAccentPresetCommand { get; }
         public RelayCommand<string> SelectThemeCommand { get; }
         public RelayCommand RefreshGpuCommand { get; }
+        public AsyncRelayCommand CheckUpdatesManualCommand { get; }
+        public AsyncRelayCommand ExportDiagnosticReportCommand { get; }
 
         public SettingsViewModel() : this(SettingsService.Instance, ToastService.Instance, ThemeService.Instance)
         {
@@ -284,6 +363,9 @@ namespace MinecraftLauncher.ViewModels
                 PopulateGpuOptions();
                 _toastService.ShowSuccess("Список видеокарт обновлен");
             });
+
+            CheckUpdatesManualCommand = new AsyncRelayCommand(ExecuteCheckUpdatesManualAsync);
+            ExportDiagnosticReportCommand = new AsyncRelayCommand(ExecuteExportDiagnosticReportAsync);
 
             _themeService.ThemeChanged += () =>
             {
@@ -323,6 +405,11 @@ namespace MinecraftLauncher.ViewModels
             _screenHeight = s.ScreenHeight;
             _customWallpaperPath = s.CustomWallpaperPath;
             _gpuPreference = string.IsNullOrWhiteSpace(s.GpuPreference) ? "HighPerformance" : s.GpuPreference;
+            _checkUpdatesOnStartup = s.CheckUpdatesOnStartup;
+            _showSplashOnStartup = s.ShowSplashOnStartup;
+            _updateChannel = string.IsNullOrWhiteSpace(s.UpdateChannel) ? "stable" : s.UpdateChannel;
+            _updateMirror = string.IsNullOrWhiteSpace(s.UpdateMirror) ? "auto" : s.UpdateMirror;
+            _bandwidthLimitMbps = s.BandwidthLimitMbps;
 
             OnPropertyChanged(string.Empty);
 
@@ -374,6 +461,11 @@ namespace MinecraftLauncher.ViewModels
             s.ScreenHeight = ScreenHeight;
             s.CustomWallpaperPath = CustomWallpaperPath;
             s.GpuPreference = _gpuPreference;
+            s.CheckUpdatesOnStartup = CheckUpdatesOnStartup;
+            s.ShowSplashOnStartup = ShowSplashOnStartup;
+            s.UpdateChannel = UpdateChannel;
+            s.UpdateMirror = UpdateMirror;
+            s.BandwidthLimitMbps = BandwidthLimitMbps;
             _settingsService.Save(s);
         }
 
@@ -605,6 +697,63 @@ namespace MinecraftLauncher.ViewModels
             if (!string.IsNullOrEmpty(preset))
             {
                 _themeService.ApplyAccentPreset(preset);
+            }
+        }
+
+        private async Task ExecuteCheckUpdatesManualAsync()
+        {
+            if (IsCheckingUpdates) return;
+            IsCheckingUpdates = true;
+            try
+            {
+                _toastService.ShowInfo("Проверка наличия обновлений...", "Обновления");
+                var release = await UpdateService.Instance.CheckForUpdatesAsync(isManual: true);
+                if (release != null && release.HasUpdate)
+                {
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        var updateWin = new Views.Windows.UpdateWindow(release)
+                        {
+                            Owner = Application.Current.MainWindow
+                        };
+                        updateWin.ShowDialog();
+                    });
+                }
+                else
+                {
+                    _toastService.ShowSuccess($"У вас установлена актуальная версия {UpdateService.CurrentVersion}", "Обновления");
+                }
+            }
+            catch (Exception ex)
+            {
+                _toastService.ShowError($"Не удалось проверить обновления: {ex.Message}", "Ошибка");
+            }
+            finally
+            {
+                IsCheckingUpdates = false;
+            }
+        }
+
+        private async Task ExecuteExportDiagnosticReportAsync()
+        {
+            try
+            {
+                var sfd = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "Сохранить диагностический отчёт",
+                    Filter = "ZIP-архив (*.zip)|*.zip",
+                    FileName = $"qlauncher-report-{DateTime.Now:yyyyMMdd_HHmmss}.zip"
+                };
+
+                if (sfd.ShowDialog() == true)
+                {
+                    string zipPath = await DiagnosticReportService.Instance.GenerateReportZipAsync(sfd.FileName);
+                    _toastService.ShowSuccess($"Диагностический отчёт сохранён:\n{Path.GetFileName(zipPath)}", "Диагностика");
+                }
+            }
+            catch (Exception ex)
+            {
+                _toastService.ShowError($"Ошибка при создании отчёта: {ex.Message}", "Диагностика");
             }
         }
     }

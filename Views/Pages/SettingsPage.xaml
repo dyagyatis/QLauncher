@@ -328,6 +328,59 @@
 
                     <Border Height="1" Background="{DynamicResource HoverOverlayBrush}" Margin="0,0,0,20"/>
 
+                    <TextBlock Text="ОБНОВЛЕНИЯ И ДИАГНОСТИКА" Foreground="{DynamicResource AccentBrush}" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,15"/>
+
+                    <Grid Margin="0,0,0,15">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding CurrentVersionText}" Foreground="{DynamicResource PrimaryTextBrush}" FontSize="13" FontWeight="SemiBold"/>
+                            <TextBlock Text="Автоматический поиск новых релизов и переключение зеркал" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="11" Margin="0,2,0,0"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Проверить сейчас" Command="{Binding CheckUpdatesManualCommand}" Width="150" Height="40" Style="{StaticResource DarkButtonStyle}" FontSize="13"/>
+                    </Grid>
+
+                    <CheckBox Content="Проверять обновления при каждом запуске" Style="{StaticResource CustomCheckBox}" IsChecked="{Binding CheckUpdatesOnStartup, Mode=TwoWay}"/>
+                    <CheckBox Content="Показывать экран заставки (Splash Screen)" Style="{StaticResource CustomCheckBox}" IsChecked="{Binding ShowSplashOnStartup, Mode=TwoWay}"/>
+
+                    <TextBlock Text="Канал обновлений" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="13" Margin="0,10,0,5"/>
+                    <ComboBox Height="40" Style="{StaticResource CustomComboBoxStyle}" SelectedValuePath="Tag" SelectedValue="{Binding UpdateChannel, Mode=TwoWay}" Margin="0,0,0,15" Padding="12,0,0,0" VerticalContentAlignment="Center" FontSize="13">
+                        <ComboBoxItem Content="Стабильный канал (Рекомендуется)" Tag="stable"/>
+                        <ComboBoxItem Content="Канал бета-тестирования (Beta)" Tag="beta"/>
+                    </ComboBox>
+
+                    <TextBlock Text="Зеркало загрузки обновлений" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="13" Margin="0,0,0,5"/>
+                    <ComboBox Height="40" Style="{StaticResource CustomComboBoxStyle}" SelectedValuePath="Tag" SelectedValue="{Binding UpdateMirror, Mode=TwoWay}" Margin="0,0,0,15" Padding="12,0,0,0" VerticalContentAlignment="Center" FontSize="13">
+                        <ComboBoxItem Content="Автовыбор (GitHub с резервом на SourceForge)" Tag="auto"/>
+                        <ComboBoxItem Content="GitHub Releases" Tag="github"/>
+                        <ComboBoxItem Content="SourceForge Mirror" Tag="sourceforge"/>
+                    </ComboBox>
+
+                    <TextBlock Text="Лимит скорости загрузки" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="13" Margin="0,0,0,5"/>
+                    <ComboBox Height="40" Style="{StaticResource CustomComboBoxStyle}" SelectedValuePath="Tag" SelectedValue="{Binding BandwidthLimitTag, Mode=TwoWay}" Margin="0,0,0,15" Padding="12,0,0,0" VerticalContentAlignment="Center" FontSize="13">
+                        <ComboBoxItem Content="Без ограничений (Максимальная)" Tag="0"/>
+                        <ComboBoxItem Content="1 МБ/с (Экономный трафик)" Tag="1"/>
+                        <ComboBoxItem Content="3 МБ/с (Стабильный поток)" Tag="3"/>
+                        <ComboBoxItem Content="5 МБ/с" Tag="5"/>
+                        <ComboBoxItem Content="10 МБ/с" Tag="10"/>
+                    </ComboBox>
+
+                    <Grid Margin="0,5,0,20">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="Экспорт отчёта об ошибках" Foreground="{DynamicResource PrimaryTextBrush}" FontSize="13"/>
+                            <TextBlock Text="Формирует ZIP-архив с системными параметрами и логами" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="11" Margin="0,2,0,0"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Собрать отчёт (ZIP)" Command="{Binding ExportDiagnosticReportCommand}" Width="150" Height="40" Style="{StaticResource DarkButtonStyle}" FontSize="13"/>
+                    </Grid>
+
+                    <Border Height="1" Background="{DynamicResource HoverOverlayBrush}" Margin="0,0,0,20"/>
+
                     <TextBlock Text="ДАННЫЕ НАСТРОЕК" Foreground="{DynamicResource AccentBrush}" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,15"/>
                     <StackPanel Orientation="Horizontal">
                         <Button Content="Экспорт" Width="110" Height="40" Style="{StaticResource DarkButtonStyle}" Margin="0,0,10,0" Click="ExportSettings_Click" FontSize="13"/>
