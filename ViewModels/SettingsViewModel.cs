@@ -204,25 +204,14 @@ namespace MinecraftLauncher.ViewModels
             set => SetProperty(ref _activeGpuDetails, value);
         }
 
-        private bool _isUpdatingTheme;
-
         public bool IsDarkTheme
         {
             get => _themeService.IsDarkTheme;
             set
             {
-                if (_isUpdatingTheme) return;
-                if (_themeService.IsDarkTheme != value)
+                if (value && !_themeService.IsDarkTheme)
                 {
-                    _isUpdatingTheme = true;
-                    try
-                    {
-                        _themeService.SetTheme(value);
-                    }
-                    finally
-                    {
-                        _isUpdatingTheme = false;
-                    }
+                    _themeService.SetTheme(true);
                     OnPropertyChanged(nameof(IsDarkTheme));
                     OnPropertyChanged(nameof(IsLightTheme));
                 }
@@ -234,14 +223,11 @@ namespace MinecraftLauncher.ViewModels
             get => !_themeService.IsDarkTheme;
             set
             {
-                if (_isUpdatingTheme) return;
                 if (value && _themeService.IsDarkTheme)
                 {
-                    IsDarkTheme = false;
-                }
-                else if (!value && !_themeService.IsDarkTheme)
-                {
-                    IsDarkTheme = true;
+                    _themeService.SetTheme(false);
+                    OnPropertyChanged(nameof(IsDarkTheme));
+                    OnPropertyChanged(nameof(IsLightTheme));
                 }
             }
         }
@@ -300,7 +286,7 @@ namespace MinecraftLauncher.ViewModels
             get => _bandwidthLimitMbps.ToString();
             set
             {
-                if (int.TryParse(value, out int parsed))
+                if (int.TryParse(value, out int parsed) && parsed != _bandwidthLimitMbps)
                 {
                     BandwidthLimitMbps = parsed;
                 }
@@ -353,9 +339,23 @@ namespace MinecraftLauncher.ViewModels
             SelectThemeCommand = new RelayCommand<string>(mode =>
             {
                 if (string.Equals(mode, "dark", StringComparison.OrdinalIgnoreCase))
-                    IsDarkTheme = true;
+                {
+                    if (!_themeService.IsDarkTheme)
+                    {
+                        _themeService.SetTheme(true);
+                        OnPropertyChanged(nameof(IsDarkTheme));
+                        OnPropertyChanged(nameof(IsLightTheme));
+                    }
+                }
                 else if (string.Equals(mode, "light", StringComparison.OrdinalIgnoreCase))
-                    IsDarkTheme = false;
+                {
+                    if (_themeService.IsDarkTheme)
+                    {
+                        _themeService.SetTheme(false);
+                        OnPropertyChanged(nameof(IsDarkTheme));
+                        OnPropertyChanged(nameof(IsLightTheme));
+                    }
+                }
             });
 
             RefreshGpuCommand = new RelayCommand(() =>
@@ -367,24 +367,23 @@ namespace MinecraftLauncher.ViewModels
             CheckUpdatesManualCommand = new AsyncRelayCommand(ExecuteCheckUpdatesManualAsync);
             ExportDiagnosticReportCommand = new AsyncRelayCommand(ExecuteExportDiagnosticReportAsync);
 
-            _themeService.ThemeChanged += () =>
-            {
-                Application.Current?.Dispatcher?.Invoke(() =>
-                {
-                    _isUpdatingTheme = true;
-                    try
-                    {
-                        OnPropertyChanged(nameof(IsDarkTheme));
-                        OnPropertyChanged(nameof(IsLightTheme));
-                    }
-                    finally
-                    {
-                        _isUpdatingTheme = false;
-                    }
-                });
-            };
+            _themeService.ThemeChanged += OnThemeChanged;
 
             LoadFromSettings();
+        }
+
+        private void OnThemeChanged()
+        {
+            Application.Current?.Dispatcher?.Invoke(() =>
+            {
+                OnPropertyChanged(nameof(IsDarkTheme));
+                OnPropertyChanged(nameof(IsLightTheme));
+            });
+        }
+
+        public void Cleanup()
+        {
+            _themeService.ThemeChanged -= OnThemeChanged;
         }
 
         public void LoadFromSettings()

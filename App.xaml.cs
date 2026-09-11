@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using MinecraftLauncher.Helpers;
@@ -14,6 +15,28 @@ namespace MinecraftLauncher
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
+
+            DispatcherUnhandledException += (s, args) =>
+            {
+                try
+                {
+                    string crashLog = Path.Combine(LauncherPathHelper.GetDefaultDataDirectory(), "launcher-crash.log");
+                    File.AppendAllText(crashLog, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] DispatcherUnhandledException:\n{args.Exception}\n\n");
+                    MessageBox.Show($"Произошла ошибка в работе приложения:\n{args.Exception.Message}\n\nЖурнал ошибки записан в:\n{crashLog}", "QLauncher", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+                catch { }
+                args.Handled = true;
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (s, args) =>
+            {
+                try
+                {
+                    string crashLog = Path.Combine(LauncherPathHelper.GetDefaultDataDirectory(), "launcher-crash.log");
+                    File.AppendAllText(crashLog, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] AppDomain UnhandledException:\n{args.ExceptionObject}\n\n");
+                }
+                catch { }
+            };
 
             LauncherPathHelper.CleanupOldBackupsAndTemp();
 

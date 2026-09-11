@@ -422,6 +422,14 @@ namespace MinecraftLauncher
                 {
                     ViewModel.SelectedVersion = lastVer;
                 }
+                else
+                {
+                    var fallback = ViewModel.Versions.FirstOrDefault(v => !v.Contains("Создать новую сборку"));
+                    if (!string.IsNullOrEmpty(fallback))
+                    {
+                        ViewModel.SelectedVersion = fallback;
+                    }
+                }
             }
         }
 

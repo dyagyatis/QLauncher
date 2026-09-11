@@ -20,6 +20,7 @@ namespace MinecraftLauncher.Views.Pages
             InitializeComponent();
             ViewModel = new SettingsViewModel();
             DataContext = ViewModel;
+            Unloaded += (s, e) => ViewModel.Cleanup();
         }
 
         private void BackButton_Click(object sender, RoutedEventArgs e)

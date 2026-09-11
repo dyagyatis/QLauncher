@@ -169,7 +169,10 @@
                     <TextBlock Text="Режим темы" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="13" Margin="0,0,0,10"/>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
                         <RadioButton Style="{StaticResource ThemeCardRadioStyle}" 
-                                     IsChecked="{Binding IsLightTheme, Mode=TwoWay}"
+                                     GroupName="ThemeSelectionGroup"
+                                     IsChecked="{Binding IsLightTheme, Mode=OneWay}"
+                                     Command="{Binding SelectThemeCommand}"
+                                     CommandParameter="light"
                                      Width="155" Margin="0,0,14,0">
                             <StackPanel>
                                 <Border CornerRadius="7" Height="92" ClipToBounds="True" Background="#E0E6ED">
@@ -194,7 +197,10 @@
                         </RadioButton>
 
                         <RadioButton Style="{StaticResource ThemeCardRadioStyle}" 
-                                     IsChecked="{Binding IsDarkTheme, Mode=TwoWay}"
+                                     GroupName="ThemeSelectionGroup"
+                                     IsChecked="{Binding IsDarkTheme, Mode=OneWay}"
+                                     Command="{Binding SelectThemeCommand}"
+                                     CommandParameter="dark"
                                      Width="155">
                             <StackPanel>
                                 <Border CornerRadius="7" Height="92" ClipToBounds="True" Background="#151A22">
