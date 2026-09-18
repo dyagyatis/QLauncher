@@ -1,8 +1,6 @@
-# 🚀 QLauncher — Next-Gen Minecraft Launcher (v2.0.0)
+![QLauncher Banner](logo.png)
 
 **QLauncher** — это современный, стильный и быстрый кастомный лаунчер для Minecraft на базе **WPF (.NET 8)** с дизайном **Fluent Glassmorphic UI**.
-
-![QLauncher Banner](logo.png)
 
 ---
 
@@ -60,8 +58,3 @@ dotnet run
 ```bash
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
 ```
-
----
-
-## 👤 Автор
-* **dyagyatis / dyagnostic** — [GitHub Repository](https://github.com/dyagyatis/QLauncher)
