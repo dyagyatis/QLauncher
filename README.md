@@ -4,7 +4,7 @@
 
 <h1 align="center">QLauncher</h1>
 
-<h1 align="center">Современный, стильный и быстрый кастомный лаунчер для Minecraft на базе WPF (.NET 10)</h1>
+<h3 align="center">Современный, стильный и быстрый кастомный лаунчер для Minecraft на базе WPF (.NET 10)</h3>
 
 
 
