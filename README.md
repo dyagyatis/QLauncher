@@ -1,5 +1,4 @@
-<img src="logo.png" width="64" alt="Описание"> **QLauncher** — это современный, стильный и быстрый кастомный лаунчер для Minecraft на базе **WPF (.NET 8)** с дизайном **Fluent Glassmorphic UI**.
-
+<img src="logo.png" width="64" alt="Описание"> **QLauncher** — это современный, стильный и быстрый кастомный лаунчер для Minecraft на базе **WPF (.NET 10)**
 ---
 
 ## Ключевые возможности
