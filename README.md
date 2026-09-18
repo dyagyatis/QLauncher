@@ -5,12 +5,6 @@
 <h1 align="center">QLauncher</h1>
 
 <p align="center">
-  <img src="https://shields.io" alt=".NET 10">
-  <img src="https://shields.io" alt="WPF">
-  <img src="https://shields.io" alt="Minecraft">
-</p>
-
-<p align="center">
   <b>Современный, стильный и быстрый кастомный лаунчер для Minecraft на базе WPF (.NET 10)</b>
 </p>
 
