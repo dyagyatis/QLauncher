@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="logo.png" width="120" alt="Современный, стильный и быстрый кастомный лаунчер для Minecraft на базе WPF (.NET 10)" title="QLauncher">
-</p>
+<img src="logo.png" width="150" alt="Современный, стильный и быстрый кастомный лаунчер для Minecraft на базе WPF (.NET 10)" title="QLauncher">
 
 ---
 
